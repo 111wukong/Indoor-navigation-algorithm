@@ -1,0 +1,44 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Environment
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Training artifacts
+weights/
+runs/
+class_indices.json
+*.pth
+*.pth.tar
+
+# Dataset
+swdatasets/
+swdata/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+/temp/
+/output/
+/input/
+
+# Config with secrets
+config.local.py

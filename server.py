@@ -1,119 +1,214 @@
-from flask import Flask, request, jsonify
-import torch
-import torchvision
-from PIL import Image
-import cv2
-import requests
+"""
+Indoor Navigation — Server Module
+
+Flask-based inference server for indoor scene recognition.
+Communicates with a remote task queue via REST API.
+"""
+
 import json
-import time
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-import zipfile
+import logging
 import os
 import shutil
-from pathlib import Path
+import time
+from typing import Optional
+
+import requests
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
 from pre01 import Eff
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+class ServerConfig:
+    """Server configuration — override via env vars or config file."""
+    BASE_URL: str = os.environ.get("API_BASE_URL", "https://landbigdata.swjtu.edu.cn/deep/")
+    INPUT_DIR: str = os.environ.get("INPUT_DIR", "/root/temp/input/")
+    OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "/root/temp/output/")
+    HOST: str = os.environ.get("SERVER_HOST", "0.0.0.0")
+    PORT: int = int(os.environ.get("SERVER_PORT", "5000"))
+    POLL_INTERVAL: float = float(os.environ.get("POLL_INTERVAL", "1.0"))
+    RUN_DOCKER: str = os.environ.get("RUN_DOCKER", "nvidia/cuda:10.2-efficientnet")
+
+
+config = ServerConfig()
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("server")
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
 
 app = Flask(__name__)
 CORS(app)
-baseurl = "https://landbigdata.swjtu.edu.cn/deep/"  #"http://192.168.31.100:8086/"
-outputpath = "/root/temp/output/"
-inputpath = "/root/temp/input/"
-zip_inputpath = "/root/temp/"
-font_path = "/root/EfficientNet-PyTorch/simhei.ttf"
+
+# Lazy-loaded model singleton
+_model: Optional[Eff] = None
 
 
-def checktask(run_docker):
-    url = baseurl + "api/aitaskcheck"
-    headers = {'Content-Type': 'application/json;charset=UTF-8'}
-    jsondata = {"runmode": "2", "taskstatus": "2", "rundocker": run_docker}
+def get_model() -> Eff:
+    """Get or create the singleton model instance."""
+    global _model
+    if _model is None:
+        logger.info("Loading model...")
+        _model = Eff()
+        logger.info("Model loaded successfully.")
+    return _model
+
+
+# ---------------------------------------------------------------------------
+# Remote API helpers
+# ---------------------------------------------------------------------------
+
+def check_task() -> Optional[dict]:
+    """Poll the remote API for a pending task."""
+    url = f"{config.BASE_URL.rstrip('/')}/api/aitaskcheck"
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(jsondata))
-        return response.text
+        resp = requests.post(
+            url,
+            headers={"Content-Type": "application/json;charset=UTF-8"},
+            json={"runmode": "2", "taskstatus": "2", "rundocker": config.RUN_DOCKER},
+            timeout=10,
+        )
+        return resp.json()
     except Exception as e:
-        print("Task detection exception：", e)
+        logger.warning("Task check failed: %s", e)
         return None
 
 
-def updatetask(aitaskid, taskstatus, outmessage, out_path):
-    url = baseurl + "api/aitaskupdate"
-    headers = {'Content-Type': 'application/json;charset=UTF-8'}
-    timestr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    if outmessage != "" and len(outmessage) > 4:
-        jsondata = {"aitaskid": "" + aitaskid + "", "taskstatus": "" + taskstatus + "", "resultdata": outmessage,
-                    "resultfile": "" + out_path + "", "overtime": "" + timestr + ""}
-    else:
-        jsondata = {"aitaskid": "" + aitaskid + "", "taskstatus": "" + taskstatus + ""}
+def update_task(
+    task_id: str,
+    status: str,
+    message: str = "",
+    output_file: str = "",
+) -> Optional[dict]:
+    """Report task status back to the remote API."""
+    url = f"{config.BASE_URL.rstrip('/')}/api/aitaskupdate"
+    payload: dict = {
+        "aitaskid": task_id,
+        "taskstatus": status,
+        "overtime": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if message:
+        payload["resultdata"] = message
+    if output_file:
+        payload["resultfile"] = output_file
+
     try:
-        y = json.dumps(jsondata)
-        print(y)
-        response = requests.post(url, headers=headers, data=json.dumps(jsondata))
-        print(response.text)
-        return response.text
+        resp = requests.post(
+            url,
+            headers={"Content-Type": "application/json;charset=UTF-8"},
+            json=payload,
+            timeout=10,
+        )
+        return resp.json()
     except Exception as e:
-        print("Server Exception...", e)
+        logger.error("Task update failed: %s", e)
+        return None
 
 
-@app.route('/recognize', methods=['POST'])
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health-check endpoint."""
+    return jsonify({"status": "ok", "model_loaded": _model is not None})
+
+
+@app.route("/recognize", methods=["POST"])
 def recognize():
-    print("object recognize server start ...")
-    Emode = Eff()
-    print("model load complete ...")
+    """
+    Single image recognition endpoint.
 
-    while True:
-        text = checktask("nvidia/cuda:10.2-efficientnet")
-        if text is not None:
-            try:
-                task = json.loads(text)
-            except Exception as e:
-                print("Detection task error:", e)
-                continue
-            if str(task['code']) == '843':
-                try:
-                    task_type = str(task['data']['tasktype'])
-                    task_id = str(task['data']['aitaskid'])
-                    image_name = str(task['data']['submitfile'])
-                    print("读取任务！")
-                    updatetask(task_id, "3", "", "")
-                    if task_type == '1':
-                        source_image_path = inputpath + image_name
-                        result_image_path = outputpath + image_name
+    Expects JSON body: {"image_path": "/path/to/image.jpg"}
+    Returns recognition result as JSON.
+    """
+    data = request.get_json(silent=True)
+    if not data or "image_path" not in data:
+        return jsonify({"code": 400, "error": "Missing 'image_path' in request body"}), 400
 
-                        print("开始识别1！")
-                        result = Emode.predict(source_image_path)
-                        print("识别结束1！")
-                        outmessage = result
-                        shutil.copyfile(source_image_path, result_image_path)
-                        print("source_image_path：", source_image_path)
+    image_path = data["image_path"]
+    if not os.path.exists(image_path):
+        return jsonify({"code": 404, "error": f"Image not found: {image_path}"}), 404
 
-                        outmessage = json.dumps(outmessage)
+    try:
+        model = get_model()
+        result = model.predict(image_path)
+        logger.info("Recognition complete: %s -> %s", image_path, result)
+        return jsonify({"code": 0, "result": result})
+    except Exception as e:
+        logger.exception("Recognition failed")
+        return jsonify({"code": 500, "error": str(e)}), 500
 
-                        updatetask(task_id, "4", outmessage, image_name)
 
-                    elif task_type == '2':
-                        source_image_path = inputpath + image_name
-                        result_image_path = outputpath + image_name
+@app.route("/poll", methods=["POST"])
+def poll_tasks():
+    """
+    Poll-based task processing (one iteration).
 
-                        print("开始识别2！")
-                        result = meter_reader.predict(source_image_path,
-                                                      save_dir='meter_model/meter_read/output/')
+    Reads one task from the remote queue, processes it, and reports back.
+    Suitable for cron-based or external scheduler invocation.
+    """
+    task = check_task()
+    if task is None:
+        return jsonify({"code": 1, "message": "No task available or network error"})
 
-                        print("mp4 outmessage:")
-                        outmessage = result
-                        outmessage = json.dumps(outmessage)
-                        sf = "meter_model/meter_read/output/result.jpg"
-                        shutil.copyfile(sf, result_image_path)
-                        print("source_image_path：", source_image_path)
-                        updatetask(task_id, "4", outmessage, image_name)
-                    else:
-                        message = "不支持此类型数据预测"
-                        outmessage = "{\"类型错误\":\"" + str(message) + "\"}"
-                        updatetask(str(task_id), "6", json.dumps(outmsg), image_name)
-                except Exception as e:
-                    outmsg = {"error information": " image inference error:{0}".format(e)}
-                    print("Algorithm running error, error is: ", e)
-                    updatetask(str(task_id), "6", outmsg, image_name)
-        time.sleep(1)
+    code = str(task.get("code", ""))
+    if code != "843":
+        return jsonify({"code": 2, "message": f"Unexpected response code: {code}"})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    try:
+        task_data = task.get("data", {})
+        task_type = str(task_data.get("tasktype", ""))
+        task_id = str(task_data.get("aitaskid", ""))
+        image_name = str(task_data.get("submitfile", ""))
+
+        logger.info("Processing task %s (type=%s, image=%s)", task_id, task_type, image_name)
+
+        update_task(task_id, "3")  # mark as processing
+
+        if task_type == "1":
+            source_path = os.path.join(config.INPUT_DIR, image_name)
+            result_path = os.path.join(config.OUTPUT_DIR, image_name)
+            os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+            model = get_model()
+            result = model.predict(source_path)
+            shutil.copy2(source_path, result_path)
+
+            update_task(task_id, "4", json.dumps(result), image_name)
+            return jsonify({"code": 0, "task_id": task_id, "result": result})
+
+        else:
+            msg = f"Unsupported task type: {task_type}"
+            update_task(task_id, "6", json.dumps({"error": msg}), image_name)
+            return jsonify({"code": 3, "error": msg})
+
+    except Exception as e:
+        logger.exception("Task processing error")
+        update_task(task_id, "6", json.dumps({"error": str(e)}), image_name)
+        return jsonify({"code": 5, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    logger.info(
+        "Starting Indoor Navigation Server on %s:%d",
+        config.HOST, config.PORT,
+    )
+    app.run(host=config.HOST, port=config.PORT, debug=False)
