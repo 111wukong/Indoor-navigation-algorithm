@@ -1,5 +1,9 @@
 # Indoor Navigation Algorithm
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/111wukong/Indoor-navigation-algorithm/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/Indoor-navigation-algorithm/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/Docker-python:3.10--slim-blue?logo=docker)](https://hub.docker.com/)
+
 EfficientNet-based indoor scene recognition system. Classifies indoor environments (corridors, rooms, stairwells, etc.) for navigation assistance.
 
 ## Architecture
