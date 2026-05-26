@@ -1,8 +1,31 @@
 """
 Indoor Navigation — Server Module
+====================================
 
 Flask-based inference server for indoor scene recognition.
 Communicates with a remote task queue via REST API.
+
+Endpoints
+---------
+``GET  /health``     — Health check; returns ``{"status": "ok", "model_loaded": bool}``.
+``POST /recognize``  — Single image recognition.  Body: ``{"image_path": "..."}``.
+                       Returns ``{"code": 0, "result": {"direct": "...", "rate": "..."}}``.
+``POST /poll``       — Poll-and-process one task from the remote queue.
+
+Quick Start
+-----------
+.. code-block:: bash
+
+   python server.py          # default: http://0.0.0.0:5000
+   curl http://localhost:5000/health
+
+   curl -X POST http://localhost:5000/recognize \\
+        -H "Content-Type: application/json" \\
+        -d '{"image_path": "/path/to/image.jpg"}'
+
+Configuration
+-------------
+All settings are read from environment variables (see ``ServerConfig``).
 """
 
 import json
