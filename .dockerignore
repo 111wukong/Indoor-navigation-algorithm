@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Model weights (large binary files — mount at runtime)
+weights/
+*.pth
+*.pt
+
+# Training artifacts
+runs/
+logs/
+*.log
+
+# Dataset
+swdatasets/
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI / Config
+.github/
