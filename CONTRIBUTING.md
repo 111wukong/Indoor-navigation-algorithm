@@ -1,6 +1,6 @@
 # Contributing to Indoor Navigation Algorithm
 
-感谢你考虑为本项目做贡献！🦞
+感谢你考虑为本项目做贡献！
 
 Thank you for considering contributing! Here's how you can help.
 
